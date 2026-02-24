@@ -599,6 +599,19 @@
 
 <div class="main">
 
+  <!-- API Key Card -->
+  <div class="card" id="api-key-card">
+    <div class="card-label">🔑 Google Gemini API-nyckel</div>
+    <div style="font-size:0.78rem; color:var(--muted); margin-bottom:0.75rem; line-height:1.6;">
+      Hämta en gratis nyckel på <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--accent); text-decoration:none;">aistudio.google.com/apikey</a>. Nyckeln sparas bara i din webbläsare.
+    </div>
+    <div style="display:flex; gap:0.5rem;">
+      <input type="password" id="api-key-input" placeholder="AIza..." style="flex:1; background:var(--surface2); border:1px solid var(--border); border-radius:8px; color:var(--text); font-family:'DM Mono',monospace; font-size:0.85rem; padding:0.6rem 0.9rem; outline:none; transition:border-color 0.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+      <button onclick="saveApiKey()" style="padding:0.6rem 1rem; background:var(--accent); color:var(--bg); border:none; border-radius:8px; font-family:'DM Mono',monospace; font-size:0.78rem; font-weight:500; cursor:pointer; white-space:nowrap;">Spara</button>
+    </div>
+    <div id="api-key-status" style="font-size:0.72rem; margin-top:0.5rem; color:var(--muted);"></div>
+  </div>
+
   <!-- Scan Card -->
   <div class="card">
     <div class="card-label">📸 Skanna etikett</div>
@@ -747,9 +760,34 @@
 </div>
 
 <script>
-let currentNutrition = null; // per 100g
+let currentNutrition = null;
 let imageBase64 = null;
+let imageMimeType = 'image/jpeg';
 let logEntries = [];
+
+// --- API Key ---
+function saveApiKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  if (!key) return;
+  localStorage.setItem('gemini_api_key', key);
+  document.getElementById('api-key-status').textContent = '✓ Nyckel sparad!';
+  document.getElementById('api-key-status').style.color = 'var(--accent)';
+  setTimeout(() => { document.getElementById('api-key-status').textContent = ''; }, 3000);
+}
+
+function getApiKey() {
+  return localStorage.getItem('gemini_api_key') || document.getElementById('api-key-input').value.trim();
+}
+
+// Load saved key on startup
+window.addEventListener('load', () => {
+  const saved = localStorage.getItem('gemini_api_key');
+  if (saved) {
+    document.getElementById('api-key-input').value = saved;
+    document.getElementById('api-key-status').textContent = '✓ Sparad nyckel laddad';
+    document.getElementById('api-key-status').style.color = 'var(--muted)';
+  }
+});
 
 // --- File upload & camera ---
 const fileInput = document.getElementById('file-input');
@@ -775,6 +813,7 @@ uploadZone.addEventListener('drop', e => {
 
 function handleFile(file) {
   if (!file || !file.type.startsWith('image/')) return;
+  imageMimeType = file.type || 'image/jpeg';
   const reader = new FileReader();
   reader.onload = ev => {
     const dataUrl = ev.target.result;
@@ -794,52 +833,66 @@ function removeImage() {
   fileInput.value = '';
 }
 
-// --- Analyze ---
+// --- Analyze with Gemini ---
 async function analyzeImage() {
   if (!imageBase64) return;
+
+  const apiKey = getApiKey();
+  if (!apiKey) {
+    showError("Ange din Gemini API-nyckel ovan först.");
+    return;
+  }
+
   showLoading(true);
   hideError();
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 1000,
-        messages: [{
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: { type: "base64", media_type: "image/jpeg", data: imageBase64 }
-            },
-            {
-              type: "text",
-              text: `Analyze this nutrition label image and extract the nutritional values per 100g. 
-Respond ONLY with a valid JSON object, no markdown, no explanation:
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              {
+                inline_data: {
+                  mime_type: imageMimeType,
+                  data: imageBase64
+                }
+              },
+              {
+                text: `Analysera denna näringsetikettsbild och extrahera näringsvärdena per 100g.
+Svara ENDAST med ett giltigt JSON-objekt, ingen markdown, ingen förklaring:
 {
-  "product_name": "product name or best guess",
-  "kcal": number (calories per 100g),
-  "protein": number (grams per 100g),
-  "carbs": number (grams per 100g),
-  "fat": number (grams per 100g)
+  "product_name": "produktnamn eller bästa gissning",
+  "kcal": number (kalorier per 100g),
+  "protein": number (gram per 100g),
+  "carbs": number (gram per 100g),
+  "fat": number (gram per 100g)
 }
-If values are per serving, convert them to per 100g. If you cannot read the label clearly, estimate based on what you can see. Always return the JSON.`
-            }
-          ]
-        }]
-      })
-    });
+Om värdena är per portion, konvertera dem till per 100g. Returnera alltid JSON.`
+              }
+            ]
+          }]
+        })
+      }
+    );
 
     const data = await response.json();
-    const text = data.content.map(i => i.text || "").join("");
+
+    if (!response.ok) {
+      const msg = data?.error?.message || "API-fel";
+      throw new Error(msg);
+    }
+
+    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "";
     const clean = text.replace(/```json|```/g, "").trim();
     const nutrition = JSON.parse(clean);
-
     setNutrition(nutrition);
+
   } catch(err) {
-    showError("Kunde inte läsa etiketten. Försök med ett tydligare foto eller ange värden manuellt.");
+    showError("Kunde inte läsa etiketten: " + (err.message || "okänt fel") + ". Kontrollera din API-nyckel eller ange värden manuellt.");
   }
 
   showLoading(false);
